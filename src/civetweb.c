@@ -8131,10 +8131,8 @@ interpret_uri(struct mg_connection *conn, /* in/out: request (must be valid) */
 		}
 
 		if (mg_stat(conn, gz_path, filestat)) {
-			if (filestat) {
-				filestat->is_gzipped = 1;
-				*is_found = 1;
-			}
+			filestat->is_gzipped = 1;
+			*is_found = 1;
 			/* Currently gz files can not be scripts. */
 			return;
 		}
@@ -16473,7 +16471,7 @@ set_ports_option(struct mg_context *phys_ctx)
 			mg_cry_ctx_internal(phys_ctx, "%s", "Out of memory");
 			closesocket(so.sock);
 			so.sock = INVALID_SOCKET;
-			mg_free(ptr);
+			phys_ctx->listening_sockets = ptr;
 			continue;
 		}
 
