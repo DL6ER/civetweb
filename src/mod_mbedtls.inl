@@ -55,7 +55,8 @@ static void mbed_debug(void *context,
                        const char *file,
                        int line,
                        const char *str);
-static int mbed_ssl_handshake(mbedtls_ssl_context *ssl);
+static int mbed_ssl_handshake(mbedtls_ssl_context *ssl,
+                              mbedtls_net_context *client_fd);
 
 
 int
@@ -217,7 +218,10 @@ mbed_ssl_accept(mbedtls_ssl_context **ssl,
 	mbedtls_ssl_init(*ssl);
 	mbedtls_ssl_setup(*ssl, &ssl_ctx->conf);
 	mbedtls_ssl_set_bio(*ssl, sock, mbedtls_net_send, mbedtls_net_recv, NULL);
-	rc = mbed_ssl_handshake(*ssl);
+	/* The bio context is the accepted (non-blocking) socket fd. mbedTLS
+	 * treats it as an mbedtls_net_context, whose only member is that fd, so
+	 * we can poll it directly while driving the handshake. */
+	rc = mbed_ssl_handshake(*ssl, (mbedtls_net_context *)sock);
 	if (rc != 0) {
 		DEBUG_TRACE("TLS handshake failed (%i)", rc);
 		mbedtls_ssl_free(*ssl);
@@ -248,14 +252,38 @@ mbed_ssl_close(mbedtls_ssl_context *ssl)
 
 
 static int
-mbed_ssl_handshake(mbedtls_ssl_context *ssl)
+mbed_ssl_handshake(mbedtls_ssl_context *ssl, mbedtls_net_context *client_fd)
 {
 	int rc;
 	while ((rc = mbedtls_ssl_handshake(ssl)) != 0) {
-		if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE
-		    && rc != MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS) {
+		uint32_t rw;
+
+		if (rc == MBEDTLS_ERR_SSL_WANT_READ) {
+			rw = MBEDTLS_NET_POLL_READ;
+		} else if (rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+			rw = MBEDTLS_NET_POLL_WRITE;
+		} else if (rc == MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS) {
+			/* The crypto operation was offloaded to an async provider:
+			 * there is no socket event to wait for, so yield briefly and
+			 * retry instead of spinning the worker thread. */
+			mg_sleep(1);
+			continue;
+		} else {
+			/* Genuine handshake error */
 			break;
 		}
+
+		/* Accepted sockets are non-blocking. Block until the socket is
+		 * ready for the operation mbedTLS is waiting for, instead of
+		 * spinning a worker thread at 100% CPU. The finite timeout keeps
+		 * the loop responsive (e.g. to the socket being closed on server
+		 * shutdown). */
+		rc = mbedtls_net_poll(client_fd, rw, SOCKET_TIMEOUT_QUANTUM);
+		if (rc < 0) {
+			/* Poll error: abort the handshake */
+			break;
+		}
+		/* rc >= 0: socket became ready or the poll timed out; retry. */
 	}
 
 #if MBEDTLS_VERSION_NUMBER >= 0x03000000

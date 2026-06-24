@@ -6166,6 +6166,10 @@ push_inner(struct mg_context *ctx,
 	/* Try to read until it succeeds, fails, times out, or the server
 	 * shuts down. */
 	for (;;) {
+		/* Which socket event to wait for before retrying a write that made
+		 * no progress. Default to write-readiness; a non-blocking TLS write
+		 * can instead need read-readiness (see the mbedTLS branch below). */
+		int want_events = POLLOUT;
 
 #if defined(USE_MBEDTLS)
 		if (ssl != NULL) {
@@ -6174,6 +6178,14 @@ push_inner(struct mg_context *ctx,
 				if ((n == MBEDTLS_ERR_SSL_WANT_READ)
 				    || (n == MBEDTLS_ERR_SSL_WANT_WRITE)
 				    || n == MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS) {
+					/* mbedTLS may need to read (e.g. during a
+					 * renegotiation) before it can write. Wait for the
+					 * operation it actually asked for: polling for write-
+					 * readiness while it wants to read busy-spins at 100%
+					 * CPU because the socket is almost always writable. */
+					if (n == MBEDTLS_ERR_SSL_WANT_READ) {
+						want_events = POLLIN;
+					}
 					n = 0;
 				} else {
 					fprintf(stderr, "SSL write failed, error %d\n", n);
@@ -6275,7 +6287,7 @@ push_inner(struct mg_context *ctx,
 			unsigned int num_sock = 1;
 
 			pfd[0].fd = sock;
-			pfd[0].events = POLLOUT;
+			pfd[0].events = (short)want_events;
 
 			if (ctx->context_type == CONTEXT_SERVER) {
 				pfd[num_sock].fd = ctx->thread_shutdown_notification_socket;
@@ -6435,6 +6447,30 @@ pull_inner(FILE *fp,
 				if ((nread == MBEDTLS_ERR_SSL_WANT_READ)
 				    || (nread == MBEDTLS_ERR_SSL_WANT_WRITE)
 				    || nread == MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS) {
+					/* mbedTLS consumed data from the socket (e.g. a non-
+					 * application TLS record) or holds buffered data that
+					 * does not yield application bytes yet, so the socket can
+					 * stay poll-readable while no progress is visible here.
+					 * Wait for the socket to become ready for the operation
+					 * mbedTLS asked for (read vs. write), bounded by the
+					 * request timeout, instead of returning immediately and
+					 * letting the request loop busy-spin at 100% CPU. */
+					num_sock = 1;
+					pfd[0].fd = conn->client.sock;
+					pfd[0].events =
+					    (nread == MBEDTLS_ERR_SSL_WANT_WRITE) ? POLLOUT : POLLIN;
+
+					if (conn->phys_ctx->context_type == CONTEXT_SERVER) {
+						pfd[num_sock].fd =
+						    conn->phys_ctx->thread_shutdown_notification_socket;
+						pfd[num_sock].events = POLLIN;
+						num_sock++;
+					}
+
+					mg_poll(pfd,
+					        num_sock,
+					        (int)(timeout * 1000.0),
+					        &(conn->phys_ctx->stop_flag));
 					nread = 0;
 				} else {
 					fprintf(stderr, "SSL read failed, error %d\n", nread);
