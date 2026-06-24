@@ -28,7 +28,7 @@
  * subsystem's global DRBG/entropy state is unprotected, and concurrent TLS
  * handshakes across civetweb worker threads will race inside
  * mbedtls_entropy_func and SIGSEGV in mbedtls_md_free. See
- * github.com/pi-hole/FTL/issues/2871. */
+ * https://github.com/pi-hole/FTL/issues/2871. */
 #if !defined(MBEDTLS_THREADING_C)
 #error "libmbedtls must be built with MBEDTLS_THREADING_C"
 #endif
