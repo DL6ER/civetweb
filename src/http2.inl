@@ -1865,6 +1865,25 @@ HPACK_TABLE_TEST()
 static void
 process_new_http2_connection(struct mg_connection *conn)
 {
+	/* This worker thread may have served an HTTP/1.x request before. The
+	 * HTTP/2 path does not run reset_per_request_attributes(), so stale
+	 * per-request state is still present and must be cleared before this
+	 * connection is handled:
+	 *   - a stale (negative) request_len makes mg_read_inner() compute a bogus
+	 *     buffered-data offset (conn->buf + request_len + consumed_content) and
+	 *     prepend a spurious out-of-bounds byte to the 24-byte connection
+	 *     preface. is_valid_http2_primer() then reads a preface shifted by one
+	 *     byte and rejects the (valid) connection with "400 Invalid HTTP/2
+	 *     primer";
+	 *   - stale request headers (for HTTP/1, request_info.http_headers point
+	 *     into conn->buf, not to allocated memory) would be mg_free()'d by
+	 *     free_buffered_request_header_list() below if handle_http2() returns
+	 *     before a HEADERS frame is received, corrupting the heap.
+	 */
+	conn->request_len = 0;
+	conn->consumed_content = 0;
+	conn->request_info.num_headers = 0;
+
 	if (!is_valid_http2_primer(conn)) {
 		/* Primer does not match expectation from RFC.
 		 * See https://tools.ietf.org/html/rfc7540#section-3.5 */
