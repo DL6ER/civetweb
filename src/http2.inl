@@ -1608,7 +1608,37 @@ handle_http2(struct mg_connection *conn)
 			/* header parsed */
 			DEBUG_TRACE("HTTP2 handle_request (stream %u)",
 			            http2_frame_stream_id);
-			handle_request_stat_log(conn);
+
+			/* Request body handling: content_len is -1 for the whole HTTP/2
+			 * connection (set in process_new_http2_connection) so the frame
+			 * loop above keeps reading frames until the connection closes. A
+			 * request handler that reads the body via mg_read(), however, would
+			 * then block until the request timeout - and consume the following
+			 * HTTP/2 frames as if they were body data - because no per-request
+			 * body length is known. If END_STREAM was set on the HEADERS frame
+			 * the request has no body, so present a body length of 0 to the
+			 * handler - both the internal content_len and the handler-visible
+			 * request_info.content_length, which may still hold a stale value
+			 * from an earlier HTTP/1.x request on this worker - and restore the
+			 * connection-level values afterwards so the frame loop keeps working.
+			 * TODO: deliver request bodies carried in DATA frames to handlers
+			 * (POST/PUT/PATCH); until then, requests with a body are not
+			 * supported over HTTP/2. */
+			{
+				const int64_t saved_content_len = conn->content_len;
+				const int64_t saved_consumed_content = conn->consumed_content;
+				const long long saved_content_length =
+				    conn->request_info.content_length;
+				if (frame_is_end_stream) {
+					conn->content_len = 0;
+					conn->consumed_content = 0;
+					conn->request_info.content_length = 0;
+				}
+				handle_request_stat_log(conn);
+				conn->content_len = saved_content_len;
+				conn->consumed_content = saved_consumed_content;
+				conn->request_info.content_length = saved_content_length;
+			}
 
 			/* Send "final" frame */
 			DEBUG_TRACE("HTTP2 handle_request done (stream %u)",
@@ -1759,7 +1789,6 @@ handle_http2(struct mg_connection *conn)
 		}
 
 		/* not used in the moment */
-		(void)frame_is_end_stream;
 		(void)frame_is_end_headers;
 		(void)client_settings;
 	}
