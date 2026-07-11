@@ -795,31 +795,31 @@ hpack_encode(uint8_t *store, const char *load, int lower)
 		append_bits((uint8_t *)store + 1, len_bits, 0xFFFFFFFF, spare_bits);
 	}
 
-	if (len_bytes >= 127) {
-		// TODO: Shift string and encode len in more bytes
-		return 0;
-	}
-	*store = 0x80 + (uint8_t)len_bytes;
-
-	if ((len_bytes >= nohuff_len) && (0)) {
-		*store = (uint8_t)nohuff_len;
-		if (lower) {
-			for (i = 1; i <= nohuff_len; i++) {
-				store[i] = tolower(load[i]);
-			}
-		} else {
-			memcpy(store + 1, load, nohuff_len);
-		}
-		return nohuff_len + 1;
+	/* Encode the payload length as an HPACK integer with a 7-bit prefix and
+	 * the Huffman flag (0x80) set (RFC 7541 section 5.1). Lengths below 127
+	 * fit in the single prefix byte reserved at store[0]; larger lengths need
+	 * one or more continuation bytes, so shift the Huffman payload (currently
+	 * at store + 1) to make room for them. */
+	if (len_bytes < 127) {
+		*store = 0x80 + (uint8_t)len_bytes;
+		return (int)(len_bytes + 1);
 	} else {
-		/*
-		int i = 0;
-		char *test = hpack_decode(store, &i, NULL);
-		i = i; // breakpoint for debugging / testing
-		*/
-	}
+		uint8_t prefix[8];
+		uint32_t prefix_len = 1;
+		uint32_t rem = len_bytes - 127;
 
-	return len_bytes + 1;
+		prefix[0] = 0xFF; /* 0x80 (Huffman) | 127 (all prefix bits set) */
+		while (rem >= 128) {
+			prefix[prefix_len++] = (uint8_t)((rem & 0x7F) | 0x80);
+			rem >>= 7;
+		}
+		prefix[prefix_len++] = (uint8_t)rem;
+
+		memmove(store + prefix_len, store + 1, len_bytes);
+		memcpy(store, prefix, prefix_len);
+
+		return (int)(len_bytes + prefix_len);
+	}
 }
 
 
