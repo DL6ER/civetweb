@@ -1161,7 +1161,14 @@ http2_reset_stream(struct mg_connection *conn,
 static void
 http2_must_use_http1(struct mg_connection *conn)
 {
-	DEBUG_TRACE("HTTP2 not available for this URL (%s)", conn->path_info);
+	/* conn->path_info is not set on the HTTP/2 request path (it is filled in
+	 * later by interpret_uri for file resources), so it is NULL here, e.g. for
+	 * a WebSocket upgrade that is being downgraded. Passing NULL to a "%s"
+	 * conversion is undefined behaviour and crashes on musl, so log the request
+	 * URI (which is set) and guard against a NULL value. */
+	DEBUG_TRACE("HTTP2 not available for this URL (%s)",
+	            conn->request_info.local_uri ? conn->request_info.local_uri
+	                                          : "");
 	http2_reset_stream(conn, conn->http2.stream_id, 0xd);
 }
 
