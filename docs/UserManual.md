@@ -597,6 +597,21 @@ Comma separated list of URI=PATH pairs, specifying that given
 URIs must be protected with password files specified by PATH.
 All Paths must be full file paths.
 
+### proxy\_protocol\_secret
+When set to a non-empty value, civetweb parses a PROXY protocol version 2 header
+at the start of each new connection and, if the header carries a matching secret,
+replaces the connection's remote address (and its HTTPS status, taken from the
+standard SSL type-length-value) with the client the header announces. The secret
+is a hex-encoded shared key that a trusted upstream terminator or layer-4 proxy
+places in a custom type-length-value (type `0xE0`); it authenticates the header
+where source-address trust is not possible, e.g. a proxy on the loopback
+interface, a sidecar, or a shared host. With no secret configured (the default)
+the header is not parsed and normal requests are unaffected.
+
+The option value is a secret. civetweb never logs it, and an application that
+reads it back (for example via `mg_get_option`) should keep it out of its own
+logs and error messages.
+
 ### put\_delete\_auth\_file
 Passwords file for PUT and DELETE requests. Without a password file, it will not
 be possible to PUT new files to the server or DELETE existing ones. PUT and
