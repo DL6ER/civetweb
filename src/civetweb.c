@@ -20335,6 +20335,36 @@ proxy_v2_hex_decode(const char *hex, unsigned char *out, size_t out_sz)
 	return (int)n;
 }
 
+/* A real proxy sends the whole header at once. Allow it this long in total, so
+ * that a client dripping the header byte by byte cannot hold a worker. */
+#define PROXY_V2_TIMEOUT_MS 3000
+
+/* Milliseconds on a clock that a changed system time does not move */
+static uint64_t
+proxy_v2_now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000) + ((uint64_t)ts.tv_nsec / 1000000);
+}
+
+/* Wait until the socket is readable, at most until `deadline` (as returned by
+ * proxy_v2_now_ms()). Returns what poll() returns, 0 once the deadline has
+ * passed. */
+static int
+proxy_v2_poll(const struct mg_connection *conn, uint64_t deadline)
+{
+	struct pollfd pfd;
+	uint64_t now = proxy_v2_now_ms();
+	if (now >= deadline) {
+		return 0;
+	}
+	pfd.fd = conn->client.sock;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+	return poll(&pfd, 1, (int)(deadline - now));
+}
+
 /* Parse a PROXY protocol v2 header on a fresh connection and, if it is trusted
  * (carries the configured secret), replace the remote address with the real
  * client the header announces. A no-op when the feature is disabled or no PROXY
@@ -20347,9 +20377,9 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 	const char *secret_hex;
 	unsigned char secret[64];
 	int secret_len;
-	struct pollfd pfd;
+	uint64_t deadline;
 	unsigned char hdr[16];
-	unsigned char buf[16 + 216]; /* 216 = largest v2 address block */
+	unsigned char *buf;
 	size_t addr_len, total, got, addr_size = 0;
 	int have;
 	const unsigned char *a;
@@ -20373,16 +20403,15 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 		return; /* misconfigured secret */
 	}
 
+	deadline = proxy_v2_now_ms() + PROXY_V2_TIMEOUT_MS;
+
 	/* Peek the fixed 16-byte v2 header. Retry until 16 bytes are available, or
 	 * bail as soon as the available prefix already fails to match the
 	 * signature (i.e. this is a normal request, not a PROXY header). */
 	have = 0;
 	while (have < 16) {
 		int n;
-		pfd.fd = conn->client.sock;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		if (poll(&pfd, 1, 1000) <= 0) {
+		if (proxy_v2_poll(conn, deadline) <= 0) {
 			return;
 		}
 		n = (int)recv(conn->client.sock, hdr, sizeof(hdr), MSG_PEEK);
@@ -20405,9 +20434,12 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 		return; /* not version 2 */
 	}
 
+	/* The length covers the TLVs as well, which a proxy may send beyond the
+	 * address block and our secret, so take the whole header (at most 64 KiB). */
 	addr_len = ((size_t)hdr[14] << 8) | (size_t)hdr[15];
 	total = 16 + addr_len;
-	if (total > sizeof(buf)) {
+	buf = (unsigned char *)mg_malloc(total);
+	if (buf == NULL) {
 		return;
 	}
 
@@ -20415,15 +20447,12 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 	got = 0;
 	while (got < total) {
 		int n;
-		pfd.fd = conn->client.sock;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		if (poll(&pfd, 1, 1000) <= 0) {
-			return;
+		if (proxy_v2_poll(conn, deadline) <= 0) {
+			goto done;
 		}
 		n = (int)recv(conn->client.sock, buf + got, total - got, 0);
 		if (n <= 0) {
-			return;
+			goto done;
 		}
 		got += (size_t)n;
 	}
@@ -20431,7 +20460,7 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 	/* Only the PROXY command (0x01) carries a real address; LOCAL (0x00) keeps
 	 * the original one. */
 	if ((hdr[12] & 0x0F) != 0x01) {
-		return;
+		goto done;
 	}
 
 	a = buf + 16;
@@ -20446,7 +20475,7 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 	}
 #endif
 	if (addr_size == 0) {
-		return; /* unsupported/short address block */
+		goto done; /* unsupported/short address block */
 	}
 
 	/* Walk the TLVs that follow the address block. Require the shared secret
@@ -20479,7 +20508,7 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 			off += l;
 		}
 		if (!token_ok) {
-			return; /* secret missing or wrong - ignore the header */
+			goto done; /* secret missing or wrong - ignore the header */
 		}
 
 		/* Trusted: adopt the real client address and TLS status. */
@@ -20499,6 +20528,9 @@ parse_proxy_protocol_v2(struct mg_connection *conn)
 #endif
 		conn->proxy_is_ssl = ssl_flag ? 1 : 0;
 	}
+
+done:
+	mg_free(buf);
 }
 
 
