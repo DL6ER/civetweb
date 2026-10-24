@@ -7286,12 +7286,16 @@ mg_printf(struct mg_connection *conn, const char *fmt, ...)
 }
 
 
-CIVETWEB_API int
-mg_url_decode(const char *src,
+/* allow_space: accept a literal space in src. A multipart/form-data file
+ * name is a quoted string, not URL encoded, and browsers send spaces in it
+ * as they are. Control characters are rejected in either case. */
+static int
+url_decode_ex(const char *src,
               int src_len,
               char *dst,
               int dst_len,
-              int is_form_url_encoded)
+              int is_form_url_encoded,
+              int allow_space)
 {
 	int i, j, a, b;
 
@@ -7307,6 +7311,8 @@ mg_url_decode(const char *src,
 			i += 2;
 		} else if (is_form_url_encoded && (src[i] == '+')) {
 			dst[j] = ' ';
+		} else if (allow_space && (src[i] == ' ')) {
+			dst[j] = ' ';
 		} else if ((unsigned char)src[i] <= ' ') {
 			return -1; /* invalid character */
 		} else {
@@ -7319,6 +7325,17 @@ mg_url_decode(const char *src,
 	dst[j] = '\0'; /* Null-terminate the destination */
 
 	return (i >= src_len) ? j : -1;
+}
+
+
+CIVETWEB_API int
+mg_url_decode(const char *src,
+              int src_len,
+              char *dst,
+              int dst_len,
+              int is_form_url_encoded)
+{
+	return url_decode_ex(src, src_len, dst, dst_len, is_form_url_encoded, 0);
 }
 
 
