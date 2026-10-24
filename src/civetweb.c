@@ -7006,6 +7006,18 @@ mg_read(struct mg_connection *conn, void *buf, size_t len)
 					break;
 				}
 
+				/* The chunk size comes from the peer. A value that does not
+				 * fit into the rest of the int64_t range either overflows
+				 * content_len or, cast to int64_t, makes it negative, which
+				 * mg_read_inner() takes as "read until the connection is
+				 * closed". Compare as uint64_t: unsigned long may be 32 bit.
+				 * Here content_len == consumed_content >= 0. */
+				if ((uint64_t)chunkSize
+				    > (uint64_t)(INT64_MAX - conn->content_len)) {
+					conn->is_chunked = 2;
+					return -1;
+				}
+
 				/* append a new chunk */
 				conn->content_len += (int64_t)chunkSize;
 			}
