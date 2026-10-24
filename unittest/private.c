@@ -216,6 +216,39 @@ START_TEST(test_parse_http_message)
 END_TEST
 
 
+/* Regression test (upstream issue #1446): a request with more than
+ * MG_MAX_HEADERS headers was accepted and the extra headers were silently
+ * dropped, including any Content-Length or Transfer-Encoding among them.
+ * Exactly MG_MAX_HEADERS headers must still be accepted. */
+START_TEST(test_parse_http_header_limit)
+{
+	struct mg_request_info ri;
+	char req[4096];
+	int len, i;
+
+	for (i = 0; i < 2; i++) {
+		int n, num = (int)MG_MAX_HEADERS + i;
+		len = snprintf(req, sizeof(req), "GET / HTTP/1.1\r\n");
+		for (n = 0; n < num; n++) {
+			len += snprintf(req + len,
+			                sizeof(req) - (size_t)len,
+			                "X-H%d: v\r\n",
+			                n);
+		}
+		len += snprintf(req + len, sizeof(req) - (size_t)len, "\r\n");
+		ck_assert_int_lt(len, (int)sizeof(req));
+
+		if (i == 0) {
+			ck_assert_int_eq(len, test_parse_http_request(req, len, &ri));
+			ck_assert_int_eq((int)MG_MAX_HEADERS, ri.num_headers);
+		} else {
+			ck_assert_int_eq(-1, test_parse_http_request(req, len, &ri));
+		}
+	}
+}
+END_TEST
+
+
 START_TEST(test_should_keep_alive)
 {
 	/* Adapted from unit_test.c */
@@ -1789,6 +1822,7 @@ make_private_suite(void)
 	TCase *const tcase_poll = tcase_create("Poll");
 
 	tcase_add_test(tcase_http_message, test_parse_http_message);
+	tcase_add_test(tcase_http_message, test_parse_http_header_limit);
 	tcase_set_timeout(tcase_http_message, civetweb_min_test_timeout);
 	suite_add_tcase(suite, tcase_http_message);
 
@@ -1886,6 +1920,7 @@ MAIN_PRIVATE(void)
 	test_parse_date_string(0);
 	test_parse_port_string(0);
 	test_parse_http_message(0);
+	test_parse_http_header_limit(0);
 	test_parse_http_headers(0);
 	test_sha1(0);
 
